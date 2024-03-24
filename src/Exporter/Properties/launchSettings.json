@@ -2,7 +2,7 @@
   "profiles": {
     "Exporter": {
       "commandName": "Project",
-      "commandLineArgs": "--computing-location fr"
+      "commandLineArgs": "--computing-location de"
     },
     "Container (Dockerfile)": {
       "commandName": "Docker"

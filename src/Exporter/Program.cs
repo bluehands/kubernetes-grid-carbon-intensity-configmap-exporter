@@ -1,6 +1,7 @@
 ﻿using System.CommandLine;
 using System.CommandLine.NamingConventionBinder;
 using System.ComponentModel.DataAnnotations;
+using System.Globalization;
 using static System.Runtime.InteropServices.JavaScript.JSType;
 using System.Net;
 using System.Text;
@@ -36,43 +37,66 @@ namespace Exporter
             root.Handler = CommandHandler.Create(ExecuteRootCommand);
             return root;
         }
-        private static async Task ExecuteRootCommand(string computingLocation, string forecastDataEndpointTemplate, string configmapNamespace, string configmapName, string configmapKey)
+        private static async Task<int> ExecuteRootCommand(string computingLocation, string forecastDataEndpointTemplate, string configmapNamespace, string configmapName, string configmapKey)
         {
-            if (!ComputingLocations.TryParse(computingLocation, out ComputingLocation? location))
+            try
             {
-                return;
+                if (!ComputingLocations.TryParse(computingLocation, out ComputingLocation? location))
+                {
+                    await Console.Error.WriteLineAsync($"No supported computing location found for {computingLocation}");
+                    await Console.Error.WriteLineAsync($"See https://github.com/bluehands/Carbon-Aware-Computing");
+                    await Console.Error.WriteLineAsync($"To get the list of locations: https://forecast.carbon-aware-computing.com/locations");
+                    return -1;
+                }
+
+                var emissionData = await GetEmissionData(location, forecastDataEndpointTemplate);
+                var exporterData = TransformData(emissionData);
+                var json = JsonSerializer.Serialize(exporterData, new JsonSerializerOptions
+                {
+                    PropertyNamingPolicy = JsonNamingPolicy.CamelCase
+                });
+
+                await UpdateConfigmap(configmapNamespace, configmapName, configmapKey, json, exporterData.Count, exporterData.FirstOrDefault()?.Timestamp, exporterData.LastOrDefault()?.Timestamp);
+                return 0;
             }
-
-            var emissionData = await GetEmissionData(location, forecastDataEndpointTemplate);
-            var exporterData = TransformData(emissionData);
-            var json = JsonSerializer.Serialize(exporterData, new JsonSerializerOptions
+            catch (Exception ex)
             {
-                PropertyNamingPolicy = JsonNamingPolicy.CamelCase
-            });
-
-            await UpdateConfigmap(configmapNamespace, configmapName, configmapKey, json);
+                await Console.Error.WriteLineAsync(ex.ToString());
+                return -1;
+            }
         }
 
-        private static IEnumerable<ExporterData> TransformData(List<EmissionsData> emissionData)
+        private static List<ExporterData> TransformData(List<EmissionsData> emissionData)
         {
             var exporterData = emissionData.
                 Where(e => e.Rating > 0).
-                Select(e => new ExporterData(e.Time, Convert.ToInt32(e.Duration.TotalMinutes), e.Rating));
+                Select(e => new ExporterData(e.Time, Convert.ToInt32(e.Duration.TotalMinutes), e.Rating)).
+                ToList();
+            Console.WriteLine($"Transform {exporterData.Count} data points");
             return exporterData;
         }
 
-        private static async Task UpdateConfigmap(string configmapNamespace, string configmapName, string configmapKey, string json)
+        private static async Task UpdateConfigmap(string configmapNamespace, string configmapName, string configmapKey, string json, int numOfRecords, DateTimeOffset? minForecast, DateTimeOffset? maxForecast)
         {
             var client = new KubernetesClient();
             var configMap = await GetConfigMap(configmapNamespace, configmapName, client);
-            await UpdateData(configmapKey, json, configMap, client);
+            UpdateMetadata("lastHeartbeatTime", DateTimeOffset.Now.ToString("O"), configMap);
+            UpdateMetadata("numOfRecords", numOfRecords.ToString(CultureInfo.InvariantCulture), configMap);
+            UpdateMetadata("minForecast", $"{minForecast:O}", configMap);
+            UpdateMetadata("maxForecast", $"{maxForecast:O}", configMap);
+            UpdateData(configmapKey, json, configMap);
+            await client.UpdateAsync(configMap);
+            Console.WriteLine($"Update configmap {configmapNamespace}/{configmapName}");
         }
-
-        private static async Task UpdateData(string configmapKey, string json, V1ConfigMap configMap, KubernetesClient client)
+        private static void UpdateMetadata(string configmapKey, string data, V1ConfigMap configMap)
+        {
+            configMap.Data ??= new Dictionary<string, string>();
+            configMap.Data[configmapKey] = data;
+        }
+        private static void UpdateData(string configmapKey, string json, V1ConfigMap configMap)
         {
             configMap.BinaryData ??= new Dictionary<string, byte[]>();
             configMap.BinaryData[configmapKey] = Encoding.UTF8.GetBytes(json);
-            await client.UpdateAsync(configMap);
         }
 
         private static async Task<V1ConfigMap> GetConfigMap(string configmapNamespace, string configmapName, KubernetesClient client)
@@ -91,6 +115,7 @@ namespace Exporter
         {
             var provider = new CarbonAwareDataProviderOpenData(forecastDataEndpointTemplate);
             var emissionData = await provider.GetForecastData(location!);
+            Console.WriteLine($"Download {emissionData.Count} data points");
             return emissionData;
         }
     }
