@@ -1,0 +1,11 @@
+{
+  "profiles": {
+    "Exporter": {
+      "commandName": "Project",
+      "commandLineArgs": "--computing-location fr"
+    },
+    "Container (Dockerfile)": {
+      "commandName": "Docker"
+    }
+  }
+}
